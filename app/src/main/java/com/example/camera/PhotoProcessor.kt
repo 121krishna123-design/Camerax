@@ -75,8 +75,22 @@ object PhotoProcessor {
         // 3. Crop to aspect ratio if user selected 16:9, 1:1 or Full
         val croppedBitmap = cropToAspectRatio(rawBitmap, aspectRatio)
         
-        // 4. Natural Sony IMX882 ISP & HDR Image Processing
-        val enhancedBitmap = applyVivoT3SensorEnhancement(croppedBitmap, mode, isFrontCamera)
+        // 4. Natural Sony IMX882 ISP & Neural HDR Image Processing
+        val ispEnhanced = applyVivoT3SensorEnhancement(croppedBitmap, mode, isFrontCamera)
+        val hdrEnhanced = if (mode == CameraMode.NIGHT || mode == CameraMode.ASTRO || mode == CameraMode.HIGH_RES_50MP || mode == CameraMode.PHOTO) {
+            com.example.camera.engine.NeuralHdrEngine.processNeuralHdr(
+                inputBitmap = ispEnhanced,
+                dynamicRangeBoost = if (mode == CameraMode.NIGHT) 1.55f else 1.35f,
+                shadowLift = if (mode == CameraMode.NIGHT) 1.45f else 1.25f,
+                highlightPreserve = 0.82f
+            )
+        } else {
+            ispEnhanced
+        }
+        val enhancedBitmap = com.example.camera.engine.NeuralHdrEngine.processNeuralEdgeClarity(
+            inputBitmap = hdrEnhanced,
+            sharpnessAmount = if (mode == CameraMode.HIGH_RES_50MP) 0.55f else 0.35f
+        )
 
         // 5. Apply user selected creative filter (if any)
         val filteredBitmap = applyColorFilter(enhancedBitmap, filter)
