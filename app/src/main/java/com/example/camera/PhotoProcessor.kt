@@ -1,6 +1,5 @@
 package com.example.camera
 
-import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
@@ -50,37 +49,56 @@ object PhotoProcessor {
         isoText: String = "ISO 100",
         shutterText: String = "1/120s"
     ): CapturedItem = withContext(Dispatchers.IO) {
-        // 1. Decode bitmap with orientation
+        // 1. Read real EXIF data from hardware sensor capture if present
+        var realIso = isoText
+        var realShutter = shutterText
+        var realFocal = if (isFrontCamera) "24mm (Front HD)" else "26mm (Sony IMX882 OIS)"
+        try {
+            val exif = ExifInterface(rawFile.absolutePath)
+            val isoVal = exif.getAttribute(ExifInterface.TAG_ISO_SPEED_RATINGS)
+            if (!isoVal.isNullOrBlank()) realIso = "ISO $isoVal"
+            
+            val expVal = exif.getAttribute(ExifInterface.TAG_EXPOSURE_TIME)
+            if (!expVal.isNullOrBlank()) {
+                val expFloat = expVal.toFloatOrNull()
+                realShutter = if (expFloat != null && expFloat > 0 && expFloat < 1) {
+                    "1/${(1f / expFloat).toInt()}s"
+                } else {
+                    "${expVal}s"
+                }
+            }
+        } catch (_: Exception) {}
+
+        // 2. Decode raw bitmap accurately maintaining natural sensor orientation
         val rawBitmap = decodeRotatedBitmap(rawFile.absolutePath, isFrontCamera)
         
-        // 2. Crop to aspect ratio if needed
+        // 3. Crop to aspect ratio if user selected 16:9, 1:1 or Full
         val croppedBitmap = cropToAspectRatio(rawBitmap, aspectRatio)
         
-        // 3. Apply Vivo Sony IMX882 High Dynamic Range & Color Enhancement
-        val enhancedBitmap = applyVivoT3SensorEnhancement(croppedBitmap, mode)
+        // 4. Natural Sony IMX882 ISP & HDR Image Processing
+        val enhancedBitmap = applyVivoT3SensorEnhancement(croppedBitmap, mode, isFrontCamera)
 
-        // 4. Apply user color filter
+        // 5. Apply user selected creative filter (if any)
         val filteredBitmap = applyColorFilter(enhancedBitmap, filter)
         
-        // 5. Apply portrait bokeh if portrait mode
+        // 6. Apply portrait bokeh rendering if in Portrait mode
         val processedBitmap = if (mode == CameraMode.PORTRAIT) {
             applyPortraitBokehSimulation(filteredBitmap, portraitSettings)
         } else {
             filteredBitmap
         }
         
-        // 6. Apply Vivo T3 Watermark
+        // 7. Apply Vivo T3 Watermark
         val finalBitmap = if (watermarkSettings.enabled) {
-            applyVivoWatermark(processedBitmap, watermarkSettings, mode)
+            applyVivoWatermark(processedBitmap, watermarkSettings, mode, isFrontCamera)
         } else {
             processedBitmap
         }
         
-        // 7. Save to BOTH App Internal Storage AND Public DCIM/Camera (Phone Gallery)
+        // 8. Save with 100% loss-free JPEG compression
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val fileName = "IMG_${timestamp}_VIVOT3_${mode.name.lowercase(Locale.US)}.jpg"
+        val fileName = "IMG_${timestamp}_VIVOT3.jpg"
         
-        // Internal cache for in-app instant preview
         val internalDir = File(context.filesDir, "vivo_photos")
         if (!internalDir.exists()) internalDir.mkdirs()
         val internalFile = File(internalDir, fileName)
@@ -88,10 +106,10 @@ object PhotoProcessor {
             finalBitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
         }
 
-        // Public Gallery Save (MediaStore DCIM/Camera)
+        // Public Gallery Save (DCIM/Camera) with immediate media scanner notification
         val savedPublicUri = saveToPublicGallery(context, finalBitmap, fileName)
         
-        // Clean up temp raw file
+        // Clean temp raw file
         if (rawFile.exists() && rawFile.absolutePath != internalFile.absolutePath) {
             rawFile.delete()
         }
@@ -107,10 +125,10 @@ object PhotoProcessor {
             filter = filter,
             watermarkApplied = watermarkSettings.enabled,
             isVideo = false,
-            exifIso = isoText,
-            exifShutter = shutterText,
-            exifAperture = if (mode == CameraMode.PORTRAIT) "f/${String.format(Locale.US, "%.1f", portraitSettings.apertureFStop)}" else "f/1.79",
-            exifLens = if (mode == CameraMode.HIGH_RES_50MP) "26mm • 50MP Sony IMX882 OIS" else "26mm (vivo T3 5G)"
+            exifIso = realIso,
+            exifShutter = realShutter,
+            exifAperture = if (mode == CameraMode.PORTRAIT) "f/${String.format(Locale.US, "%.1f", portraitSettings.apertureFStop)}" else if (isFrontCamera) "f/2.0" else "f/1.79",
+            exifLens = if (mode == CameraMode.HIGH_RES_50MP) "26mm • 50MP Sony IMX882 OIS" else realFocal
         )
     }
 
@@ -141,7 +159,6 @@ object PhotoProcessor {
                     resolver.update(uri, contentValues, null, null)
                 }
 
-                // Explicit MediaScanner broadcast to force Android system gallery to index immediately
                 try {
                     val projection = arrayOf(MediaStore.Images.Media.DATA)
                     resolver.query(uri, projection, null, null, null)?.use { cursor ->
@@ -160,7 +177,10 @@ object PhotoProcessor {
         }
     }
 
-    private fun applyVivoT3SensorEnhancement(src: Bitmap, mode: CameraMode): Bitmap {
+    /**
+     * Enhanced ISP Natural Image Enhancement (Preserves real sensor contrast, fixes washed out / dark shots)
+     */
+    private fun applyVivoT3SensorEnhancement(src: Bitmap, mode: CameraMode, isFrontCamera: Boolean): Bitmap {
         val output = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
@@ -168,41 +188,40 @@ object PhotoProcessor {
 
         when (mode) {
             CameraMode.NIGHT, CameraMode.ASTRO -> {
-                // Vivo Super Night 2.0: Deep dynamic range boost and shadow lift
-                val brightness = 20f
-                val contrast = 1.10f
+                // Super Night 2.0: Deep dynamic range boost and shadow lift without washing out blacks
                 cm.set(floatArrayOf(
-                    contrast, 0f, 0f, 0f, brightness,
-                    0f, contrast, 0f, 0f, brightness,
-                    0f, 0f, contrast * 1.03f, 0f, brightness + 2f,
+                    1.12f, 0f, 0f, 0f, 18f,
+                    0f, 1.12f, 0f, 0f, 18f,
+                    0f, 0f, 1.15f, 0f, 22f,
                     0f, 0f, 0f, 1f, 0f
                 ))
             }
             CameraMode.HIGH_RES_50MP -> {
-                // 50MP Ultra HD Mode: Pristine clarity, subtle micro-contrast
-                cm.setSaturation(1.10f)
-                val contrast = 1.06f
+                // 50MP Ultra HD Mode: Crisp, pristine natural rendering
+                cm.setSaturation(1.08f)
+                val contrast = 1.05f
                 val t = (-0.5f * contrast + 0.5f) * 255f
                 cm.postConcat(ColorMatrix(floatArrayOf(
-                    contrast, 0f, 0f, 0f, t + 3f,
-                    0f, contrast, 0f, 0f, t + 3f,
-                    0f, 0f, contrast, 0f, t + 3f,
+                    contrast, 0f, 0f, 0f, t + 4f,
+                    0f, contrast, 0f, 0f, t + 4f,
+                    0f, 0f, contrast, 0f, t + 4f,
                     0f, 0f, 0f, 1f, 0f
                 )))
             }
             CameraMode.PORTRAIT -> {
-                // Natural warm skin tone rendering
-                cm.set(floatArrayOf(
-                    1.05f, 0f, 0f, 0f, 5f,
-                    0f, 1.02f, 0f, 0f, 3f,
+                // Front / Rear Portrait: Flattering warm skin tone and gentle highlight softness
+                cm.setSaturation(1.05f)
+                val skinMatrix = ColorMatrix(floatArrayOf(
+                    1.06f, 0f, 0f, 0f, 6f,
+                    0f, 1.03f, 0f, 0f, 4f,
                     0f, 0f, 0.98f, 0f, 0f,
                     0f, 0f, 0f, 1f, 0f
                 ))
+                cm.postConcat(skinMatrix)
             }
             CameraMode.DOC_SCAN -> {
-                // High contrast document scanning
-                cm.setSaturation(0.2f)
-                val contrast = 1.35f
+                cm.setSaturation(0.1f)
+                val contrast = 1.4f
                 val t = (-0.5f * contrast + 0.5f) * 255f
                 cm.postConcat(ColorMatrix(floatArrayOf(
                     contrast, 0f, 0f, 0f, t,
@@ -212,9 +231,9 @@ object PhotoProcessor {
                 )))
             }
             else -> {
-                // Vivo Signature Vibrant Sony IMX882 Tuning
-                cm.setSaturation(1.15f)
-                val contrast = 1.06f
+                // Standard Photo Mode: Sony IMX882 true-color vibrant look
+                cm.setSaturation(1.10f)
+                val contrast = 1.04f
                 val t = (-0.5f * contrast + 0.5f) * 255f
                 cm.postConcat(ColorMatrix(floatArrayOf(
                     contrast, 0f, 0f, 0f, t + 3f,
@@ -285,13 +304,11 @@ object PhotoProcessor {
         val startY: Int
 
         if (currentRatio > targetRatio) {
-            // Source is wider than target
             newHeight = height
             newWidth = (height * targetRatio).toInt()
             startX = (width - newWidth) / 2
             startY = 0
         } else {
-            // Source is taller than target
             newWidth = width
             newHeight = (width / targetRatio).toInt()
             startX = 0
@@ -410,7 +427,8 @@ object PhotoProcessor {
     private fun applyVivoWatermark(
         src: Bitmap,
         watermarkSettings: WatermarkSettings,
-        mode: CameraMode
+        mode: CameraMode,
+        isFrontCamera: Boolean
     ): Bitmap {
         val result = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(result)
@@ -436,7 +454,13 @@ object PhotoProcessor {
         when (watermarkSettings.style) {
             WatermarkStyle.CLASSIC_VIVO -> {
                 val primaryText = "vivo T3 5G"
-                val secondaryText = if (mode == CameraMode.HIGH_RES_50MP) "50MP ULTRA HD | OIS" else "50MP OIS Camera"
+                val secondaryText = if (isFrontCamera) {
+                    "16MP HD Portrait"
+                } else if (mode == CameraMode.HIGH_RES_50MP) {
+                    "50MP ULTRA HD | OIS"
+                } else {
+                    "50MP OIS Camera"
+                }
                 val dateText = SimpleDateFormat("yyyy.MM.dd HH:mm", Locale.getDefault()).format(Date())
 
                 textPaint.textSize = 28f * scale
@@ -487,7 +511,7 @@ object PhotoProcessor {
                 subTextPaint.textSize = 16f * scale
                 
                 val dateText = SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.getDefault()).format(Date())
-                val mainTitle = "VIVO T3 5G  •  50MP SONY IMX882 OIS"
+                val mainTitle = if (isFrontCamera) "VIVO T3 5G  •  16MP HD FRONT CAMERA" else "VIVO T3 5G  •  50MP SONY IMX882 OIS"
                 canvas.drawText(mainTitle, padding, bottomY - 10f * scale, textPaint)
                 if (watermarkSettings.showDateTime) {
                     canvas.drawText(dateText, padding, bottomY + 12f * scale, subTextPaint)
@@ -496,7 +520,7 @@ object PhotoProcessor {
 
             WatermarkStyle.MINIMALIST -> {
                 textPaint.textSize = 22f * scale
-                canvas.drawText("vivo T3 5G | OIS", padding, bottomY, textPaint)
+                canvas.drawText(if (isFrontCamera) "vivo T3 5G | 16MP" else "vivo T3 5G | OIS", padding, bottomY, textPaint)
             }
 
             WatermarkStyle.FILM_BORDER -> {

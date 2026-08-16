@@ -7,42 +7,39 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.media.MediaActionSound
-import android.net.Uri
-import android.os.CountDownTimer
 import android.util.Log
+import android.util.Size
+import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
-import androidx.camera.core.CameraControl
-import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
-import androidx.camera.core.SurfaceOrientedMeteringPointFactory
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionFilter
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.withContext
 import com.example.model.AiScene
 import com.example.model.AspectRatioMode
 import com.example.model.AuraLightTemp
-import com.example.model.BokehShape
 import com.example.model.CameraMode
 import com.example.model.CapturedItem
 import com.example.model.FilterType
 import com.example.model.FlashMode
 import com.example.model.GridType
 import com.example.model.HdrMode
-import com.example.model.MeteringMode
 import com.example.model.PortraitSettings
 import com.example.model.ProSettings
 import com.example.model.TimerMode
 import com.example.model.VideoQuality
 import com.example.model.WatermarkSettings
-import com.example.model.WatermarkStyle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -51,11 +48,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.atan2
 
@@ -113,6 +107,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application),
     private var videoJob: Job? = null
     private var timerJob: Job? = null
 
+    // Hold strong/direct active references for seamless switching
+    private var currentLifecycleOwner: LifecycleOwner? = null
+    private var currentPreviewView: PreviewView? = null
+
     init {
         initSensors()
         loadStoredGallery()
@@ -141,83 +139,99 @@ class CameraViewModel(application: Application) : AndroidViewModel(application),
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
     fun bindCamera(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
+        currentLifecycleOwner = lifecycleOwner
+        currentPreviewView = previewView
+
         val cameraProviderFuture = ProcessCameraProvider.getInstance(getApplication())
         cameraProviderFuture.addListener({
             try {
                 cameraProvider = cameraProviderFuture.get()
-                bindCameraUseCases(lifecycleOwner, previewView)
+                bindCameraUseCases()
             } catch (e: Exception) {
                 Log.e("CameraViewModel", "Error binding camera", e)
             }
         }, ContextCompat.getMainExecutor(getApplication()))
     }
 
-    private fun bindCameraUseCases(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
+    private fun bindCameraUseCases() {
         val provider = cameraProvider ?: return
-        provider.unbindAll()
-
-        val lensFacing = if (_uiState.value.isFrontCamera) {
-            CameraSelector.LENS_FACING_FRONT
-        } else {
-            CameraSelector.LENS_FACING_BACK
-        }
-
-        val cameraSelector = CameraSelector.Builder()
-            .requireLensFacing(lensFacing)
-            .build()
-
-        val preview = Preview.Builder().build().also {
-            it.setSurfaceProvider(previewView.surfaceProvider)
-        }
-
-        val resolutionSelector = androidx.camera.core.resolutionselector.ResolutionSelector.Builder()
-            .setAspectRatioStrategy(
-                androidx.camera.core.resolutionselector.AspectRatioStrategy(
-                    when (_uiState.value.aspectRatio) {
-                        AspectRatioMode.RATIO_16_9 -> androidx.camera.core.AspectRatio.RATIO_16_9
-                        else -> androidx.camera.core.AspectRatio.RATIO_4_3
-                    },
-                    androidx.camera.core.resolutionselector.AspectRatioStrategy.FALLBACK_RULE_AUTO
-                )
-            )
-            .setResolutionStrategy(
-                if (_uiState.value.currentMode == CameraMode.HIGH_RES_50MP) {
-                    androidx.camera.core.resolutionselector.ResolutionStrategy(
-                        android.util.Size(8192, 6144),
-                        androidx.camera.core.resolutionselector.ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER
-                    )
-                } else {
-                    androidx.camera.core.resolutionselector.ResolutionStrategy(
-                        android.util.Size(4000, 3000),
-                        androidx.camera.core.resolutionselector.ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER
-                    )
-                }
-            )
-            .build()
-
-        imageCapture = ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-            .setResolutionSelector(resolutionSelector)
-            .setJpegQuality(100)
-            .setFlashMode(
-                when (_uiState.value.flashMode) {
-                    FlashMode.ON -> ImageCapture.FLASH_MODE_ON
-                    FlashMode.AUTO -> ImageCapture.FLASH_MODE_AUTO
-                    else -> ImageCapture.FLASH_MODE_OFF
-                }
-            )
-            .build()
+        val lifecycleOwner = currentLifecycleOwner ?: return
+        val previewView = currentPreviewView ?: return
 
         try {
+            provider.unbindAll()
+
+            // 1. Determine target camera selector (Front vs Back)
+            val isFront = _uiState.value.isFrontCamera
+            val targetSelector = if (isFront) {
+                if (provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)) {
+                    CameraSelector.DEFAULT_FRONT_CAMERA
+                } else {
+                    CameraSelector.Builder().requireLensFacing(CameraSelector.LENS_FACING_FRONT).build()
+                }
+            } else {
+                if (provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA)) {
+                    CameraSelector.DEFAULT_BACK_CAMERA
+                } else {
+                    CameraSelector.Builder().requireLensFacing(CameraSelector.LENS_FACING_BACK).build()
+                }
+            }
+
+            // 2. Setup Preview
+            val preview = Preview.Builder().build().also {
+                it.setSurfaceProvider(previewView.surfaceProvider)
+            }
+
+            // 3. Setup ResolutionSelector based on camera lens and mode
+            val preferredAspect = when (_uiState.value.aspectRatio) {
+                AspectRatioMode.RATIO_16_9 -> AspectRatio.RATIO_16_9
+                else -> AspectRatio.RATIO_4_3
+            }
+
+            val targetBoundSize = if (isFront) {
+                Size(4608, 3456) // 16MP HD front camera resolution
+            } else if (_uiState.value.currentMode == CameraMode.HIGH_RES_50MP) {
+                Size(8192, 6144) // 50MP Sony IMX882 sensor resolution
+            } else {
+                Size(8192, 6144)
+            }
+
+            val resolutionSelectorBuilder = ResolutionSelector.Builder()
+                .setAspectRatioStrategy(
+                    AspectRatioStrategy(preferredAspect, AspectRatioStrategy.FALLBACK_RULE_AUTO)
+                )
+                .setResolutionStrategy(
+                    ResolutionStrategy(targetBoundSize, ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER)
+                )
+                .setResolutionFilter { supportedSizes, _ ->
+                    // Prioritize highest sensor resolution available
+                    supportedSizes.sortedByDescending { it.width * it.height }
+                }
+
+            val imageCaptureBuilder = ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                .setResolutionSelector(resolutionSelectorBuilder.build())
+                .setJpegQuality(100)
+                .setFlashMode(
+                    when (_uiState.value.flashMode) {
+                        FlashMode.ON -> ImageCapture.FLASH_MODE_ON
+                        FlashMode.AUTO -> ImageCapture.FLASH_MODE_AUTO
+                        else -> ImageCapture.FLASH_MODE_OFF
+                    }
+                )
+
+            imageCapture = imageCaptureBuilder.build()
+
             camera = provider.bindToLifecycle(
                 lifecycleOwner,
-                cameraSelector,
+                targetSelector,
                 preview,
                 imageCapture
             )
             updateCameraControls()
         } catch (e: Exception) {
-            Log.e("CameraViewModel", "Camera binding failed", e)
+            Log.e("CameraViewModel", "Camera binding failed: ${e.message}", e)
+            _uiState.update { it.copy(toastMessage = "Camera switch error: ${e.localizedMessage}") }
         }
     }
 
@@ -225,7 +239,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application),
         _uiState.update { 
             it.copy(
                 currentMode = mode,
-                // Automatically activate specific AI Scenes / settings
                 aiScene = when (mode) {
                     CameraMode.NIGHT, CameraMode.ASTRO -> AiScene.NIGHT
                     CameraMode.PORTRAIT -> AiScene.PORTRAIT
@@ -234,11 +247,22 @@ class CameraViewModel(application: Application) : AndroidViewModel(application),
                 }
             ) 
         }
+        bindCameraUseCases()
     }
 
-    fun toggleCameraFacing(lifecycleOwner: LifecycleOwner, previewView: PreviewView) {
-        _uiState.update { it.copy(isFrontCamera = !it.isFrontCamera) }
-        bindCameraUseCases(lifecycleOwner, previewView)
+    fun toggleCameraFacing(lifecycleOwner: LifecycleOwner? = null, previewView: PreviewView? = null) {
+        if (lifecycleOwner != null) currentLifecycleOwner = lifecycleOwner
+        if (previewView != null) currentPreviewView = previewView
+
+        val nextIsFront = !_uiState.value.isFrontCamera
+        _uiState.update { 
+            it.copy(
+                isFrontCamera = nextIsFront,
+                zoomRatio = 1.0f,
+                toastMessage = if (nextIsFront) "Switched to 16MP HD Front Camera" else "Switched to 50MP Sony IMX882 OIS"
+            ) 
+        }
+        bindCameraUseCases()
     }
 
     fun setZoom(zoomRatio: Float) {
@@ -250,7 +274,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application),
     fun setExposureCompensation(ev: Float) {
         val clampedEv = ev.coerceIn(-3.0f, 3.0f)
         _uiState.update { it.copy(exposureCompensation = clampedEv) }
-        // Update Camera2 exposure if available
         try {
             val evIndex = (clampedEv * 2).toInt()
             camera?.cameraControl?.setExposureCompensationIndex(evIndex)
@@ -295,6 +318,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application),
 
     fun setAspectRatio(ratio: AspectRatioMode) {
         _uiState.update { it.copy(aspectRatio = ratio) }
+        bindCameraUseCases()
     }
 
     fun setTimer(timer: TimerMode) {
@@ -414,7 +438,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application),
                     isCapturing = false,
                     lastCapturedItem = item,
                     galleryList = listOf(item) + it.galleryList,
-                    toastMessage = "Saved with vivo T3 50MP OIS Watermark"
+                    toastMessage = "Saved ${item.width}x${item.height} • vivo T3 50MP OIS"
                 )
             }
         }
@@ -422,24 +446,22 @@ class CameraViewModel(application: Application) : AndroidViewModel(application),
 
     private fun fallbackSimulatedCapture(context: Context) {
         viewModelScope.launch(Dispatchers.IO) {
-            delay(300) // Shutter delay
+            delay(300)
             val tempBmpFile = File(context.cacheDir, "sample_${System.currentTimeMillis()}.jpg")
-            // Create rich simulated high res sample
-            val bmp = android.graphics.Bitmap.createBitmap(1920, 1440, android.graphics.Bitmap.Config.ARGB_8888)
+            val bmp = android.graphics.Bitmap.createBitmap(4096, 3072, android.graphics.Bitmap.Config.ARGB_8888)
             val canvas = android.graphics.Canvas(bmp)
             
-            // Draw simulated scene gradient
             val paint = android.graphics.Paint()
             paint.shader = android.graphics.LinearGradient(
-                0f, 0f, 1920f, 1440f,
+                0f, 0f, 4096f, 3072f,
                 android.graphics.Color.parseColor("#1B2A47"),
                 android.graphics.Color.parseColor("#080D1A"),
                 android.graphics.Shader.TileMode.CLAMP
             )
-            canvas.drawRect(0f, 0f, 1920f, 1440f, paint)
+            canvas.drawRect(0f, 0f, 4096f, 3072f, paint)
 
             java.io.FileOutputStream(tempBmpFile).use { out ->
-                bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, out)
+                bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 100, out)
             }
 
             val state = _uiState.value
@@ -469,7 +491,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application),
 
     fun toggleVideoRecording(context: Context) {
         if (_uiState.value.isRecordingVideo) {
-            // Stop recording
             videoJob?.cancel()
             _uiState.update { 
                 it.copy(
@@ -478,7 +499,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application),
                 ) 
             }
         } else {
-            // Start recording
             _uiState.update { it.copy(isRecordingVideo = true, videoRecordingSeconds = 0) }
             soundPlayer.play(MediaActionSound.START_VIDEO_RECORDING)
             videoJob = viewModelScope.launch {
