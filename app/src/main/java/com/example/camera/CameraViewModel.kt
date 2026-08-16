@@ -177,31 +177,46 @@ class CameraViewModel(application: Application) : AndroidViewModel(application),
                 }
             }
 
-            // 2. Setup Preview & Aspect Ratio Strategy
+            // 3. Setup ResolutionSelector targeting full unbinned sensor resolution (4096x3072 rear / 4608x3456 front)
             val preferredAspect = when (_uiState.value.aspectRatio) {
                 AspectRatioMode.RATIO_16_9 -> AspectRatio.RATIO_16_9
                 else -> AspectRatio.RATIO_4_3
             }
 
-            val resolutionSelector = ResolutionSelector.Builder()
+            val targetBoundSize = if (isFront) {
+                Size(3456, 4608) // 16MP Full Sensor HD Front Camera
+            } else {
+                Size(3072, 4096) // 50MP Sony IMX882 Full Sensor Back Camera
+            }
+
+            val captureResolutionSelector = ResolutionSelector.Builder()
                 .setAspectRatioStrategy(
                     AspectRatioStrategy(preferredAspect, AspectRatioStrategy.FALLBACK_RULE_AUTO)
                 )
                 .setResolutionStrategy(
-                    ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY
+                    ResolutionStrategy(targetBoundSize, ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER)
+                )
+                .build()
+
+            val previewResolutionSelector = ResolutionSelector.Builder()
+                .setAspectRatioStrategy(
+                    AspectRatioStrategy(preferredAspect, AspectRatioStrategy.FALLBACK_RULE_AUTO)
+                )
+                .setResolutionStrategy(
+                    ResolutionStrategy(Size(1080, 1920), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER)
                 )
                 .build()
 
             val preview = Preview.Builder()
-                .setResolutionSelector(resolutionSelector)
+                .setResolutionSelector(previewResolutionSelector)
                 .build()
                 .also {
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
 
             val imageCaptureBuilder = ImageCapture.Builder()
-                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                .setResolutionSelector(resolutionSelector)
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .setResolutionSelector(captureResolutionSelector)
                 .setJpegQuality(100)
                 .setFlashMode(
                     when (_uiState.value.flashMode) {
@@ -381,7 +396,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application),
     }
 
     private fun executePhotoCapture(context: Context) {
-        _uiState.update { it.copy(isCapturing = true) }
         soundPlayer.play(MediaActionSound.SHUTTER_CLICK)
 
         val capture = imageCapture
