@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Camera Body Silhouette -->
+    <path
+        android:fillColor="#22252A"
+        android:pathData="M28,34 C28,30.7 30.7,28 34,28 L44,28 L47.5,24 C48.5,22.8 50,22 51.5,22 L56.5,22 C58,22 59.5,22.8 60.5,24 L64,28 L74,28 C77.3,28 80,30.7 80,34 L80,74 C80,77.3 77.3,80 74,80 L34,80 C30.7,80 28,77.3 28,74 Z" />
+
+    <!-- Top Accent Stripe -->
+    <path
+        android:fillColor="#E5A93C"
+        android:pathData="M34,28 L74,28 C77.3,28 80,30.7 80,34 L80,36 L28,36 L28,34 C28,30.7 30.7,28 34,28 Z" />
+
+    <!-- Outer Gold Lens Ring -->
+    <path
+        android:pathData="M54,55m-20,0a20,20 0 1,1 40,0a20,20 0 1,1 -40,0"
+        android:strokeWidth="2.5"
+        android:strokeColor="#E5A93C"
+        android:fillColor="#15171C" />
+
+    <!-- Inner Metallic Ring -->
+    <path
+        android:pathData="M54,55m-15,0a15,15 0 1,1 30,0a15,15 0 1,1 -30,0"
+        android:strokeWidth="1.5"
+        android:strokeColor="#4A5260"
+        android:fillColor="#0D0E11" />
+
+    <!-- Lens Core Optics with Blue Reflection -->
+    <path
+        android:pathData="M54,55m-10,0a10,10 0 1,1 20,0a10,10 0 1,1 -20,0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="46"
+                android:startY="47"
+                android:endX="62"
+                android:endY="63"
+                android:type="linear">
+                <item android:color="#2A5C99" android:offset="0.0" />
+                <item android:color="#0F1F3D" android:offset="0.6" />
+                <item android:color="#050810" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Glass Glint Highlight -->
+    <path
+        android:pathData="M49,49m-3,0a3,3 0 1,1 6,0a3,3 0 1,1 -6,0"
+        android:fillColor="#90E0FF" />
+
+    <path
+        android:pathData="M48,48m-1.5,0a1.5,1.5 0 1,1 3,0a1.5,1.5 0 1,1 -3,0"
+        android:fillColor="#FFFFFF" />
+
+    <!-- Red Aura Light / Recording dot -->
+    <path
+        android:pathData="M73,39m-2.5,0a2.5,2.5 0 1,1 5,0a2.5,2.5 0 1,1 -5,0"
+        android:fillColor="#FF4D4D" />
+
+    <!-- Flash sensor -->
+    <path
+        android:pathData="M35,39m-2,0a2,2 0 1,1 4,0a2,2 0 1,1 -4,0"
+        android:fillColor="#FDD835" />
+</vector>

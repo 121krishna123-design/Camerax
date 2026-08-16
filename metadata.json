@@ -1,0 +1,7 @@
+{
+  "name": "Vivo T3 Camera",
+  "description": "Advanced Camera app for Vivo T3 with 50MP Sony OIS mode, Super Night 2.0, Bokeh Flare Portrait, Pro Manual controls, Aura Light, 4K video, LUT filters and Vivo watermark.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
