@@ -177,37 +177,25 @@ class CameraViewModel(application: Application) : AndroidViewModel(application),
                 }
             }
 
-            // 3. Setup ResolutionSelector targeting full unbinned sensor resolution (4096x3072 rear / 4608x3456 front)
+            // 3. Setup ResolutionSelector targeting maximum sensor resolution (4096x3072 rear / 4608x3456 front)
             val preferredAspect = when (_uiState.value.aspectRatio) {
                 AspectRatioMode.RATIO_16_9 -> AspectRatio.RATIO_16_9
                 else -> AspectRatio.RATIO_4_3
             }
 
-            // Exactly match full hardware sensor unbinned resolutions requested by user
+            val targetBoundSize = if (isFront) {
+                Size(3456, 4608) // 16MP Full Sensor HD Front Camera (3456 x 4608)
+            } else {
+                Size(3072, 4096) // 50MP Sony IMX882 Sensor Full Resolution (3072 x 4096)
+            }
+
             val captureResolutionSelector = ResolutionSelector.Builder()
                 .setAspectRatioStrategy(
                     AspectRatioStrategy(preferredAspect, AspectRatioStrategy.FALLBACK_RULE_AUTO)
                 )
                 .setResolutionStrategy(
-                    ResolutionStrategy(
-                        if (isFront) Size(3456, 4608) else Size(3072, 4096),
-                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER
-                    )
+                    ResolutionStrategy(targetBoundSize, ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER)
                 )
-                .setResolutionFilter { supportedSizes, _ ->
-                    // Find highest available native hardware sensor resolution
-                    val primaryMatch = if (isFront) {
-                        supportedSizes.filter { (it.width == 3456 && it.height == 4608) || (it.width == 4608 && it.height == 3456) }
-                    } else {
-                        supportedSizes.filter { (it.width == 3072 && it.height == 4096) || (it.width == 4096 && it.height == 3072) }
-                    }
-                    if (primaryMatch.isNotEmpty()) {
-                        primaryMatch
-                    } else {
-                        // If exact not listed by HAL, pick the absolute largest resolution supported by sensor
-                        supportedSizes.sortedByDescending { it.width.toLong() * it.height.toLong() }
-                    }
-                }
                 .build()
 
             val previewResolutionSelector = ResolutionSelector.Builder()
@@ -229,7 +217,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application),
             val imageCaptureBuilder = ImageCapture.Builder()
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                 .setResolutionSelector(captureResolutionSelector)
-                .setJpegQuality(98)
+                .setJpegQuality(100)
                 .setFlashMode(
                     when (_uiState.value.flashMode) {
                         FlashMode.ON -> ImageCapture.FLASH_MODE_ON

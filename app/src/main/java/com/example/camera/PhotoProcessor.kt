@@ -75,22 +75,18 @@ object PhotoProcessor {
         // 3. Crop to aspect ratio if user selected 16:9, 1:1 or Full
         val croppedBitmap = cropToAspectRatio(rawBitmap, aspectRatio)
         
-        // 4. Natural Sony IMX882 ISP & Neural HDR Image Processing
+        // 4. Natural Sony IMX882 ISP & Balanced Exposure Image Processing
         val ispEnhanced = applyVivoT3SensorEnhancement(croppedBitmap, mode, isFrontCamera)
-        val hdrEnhanced = if (mode == CameraMode.NIGHT || mode == CameraMode.ASTRO || mode == CameraMode.HIGH_RES_50MP || mode == CameraMode.PHOTO) {
+        val enhancedBitmap = if (mode == CameraMode.NIGHT || mode == CameraMode.ASTRO) {
             com.example.camera.engine.NeuralHdrEngine.processNeuralHdr(
                 inputBitmap = ispEnhanced,
-                dynamicRangeBoost = if (mode == CameraMode.NIGHT) 1.55f else 1.35f,
-                shadowLift = if (mode == CameraMode.NIGHT) 1.45f else 1.25f,
-                highlightPreserve = 0.82f
+                dynamicRangeBoost = 1.15f,
+                shadowLift = 1.10f,
+                highlightPreserve = 0.95f
             )
         } else {
             ispEnhanced
         }
-        val enhancedBitmap = com.example.camera.engine.NeuralHdrEngine.processNeuralEdgeClarity(
-            inputBitmap = hdrEnhanced,
-            sharpnessAmount = if (mode == CameraMode.HIGH_RES_50MP) 0.55f else 0.35f
-        )
 
         // 5. Apply user selected creative filter (if any)
         val filteredBitmap = applyColorFilter(enhancedBitmap, filter)
@@ -109,7 +105,7 @@ object PhotoProcessor {
             processedBitmap
         }
         
-        // 8. Save with 100% loss-free JPEG compression
+        // 8. Save with high-speed loss-free JPEG compression
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val fileName = "IMG_${timestamp}_VIVOT3.jpg"
         
@@ -117,7 +113,7 @@ object PhotoProcessor {
         if (!internalDir.exists()) internalDir.mkdirs()
         val internalFile = File(internalDir, fileName)
         FileOutputStream(internalFile).use { out ->
-            finalBitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
+            finalBitmap.compress(Bitmap.CompressFormat.JPEG, 98, out)
         }
 
         // Public Gallery Save (DCIM/Camera) with immediate media scanner notification
@@ -192,75 +188,30 @@ object PhotoProcessor {
     }
 
     /**
-     * Enhanced ISP Natural Image Enhancement (Preserves real sensor contrast, fixes washed out / dark shots)
+     * Preserves 100% authentic Sony IMX882 / Samsung JN1 raw sensor colors and sharpness without artificial over-exposure
      */
     private fun applyVivoT3SensorEnhancement(src: Bitmap, mode: CameraMode, isFrontCamera: Boolean): Bitmap {
-        val output = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(output)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        val cm = ColorMatrix()
-
-        when (mode) {
-            CameraMode.NIGHT, CameraMode.ASTRO -> {
-                // Super Night 2.0: Deep dynamic range boost and shadow lift without washing out blacks
-                cm.set(floatArrayOf(
-                    1.12f, 0f, 0f, 0f, 18f,
-                    0f, 1.12f, 0f, 0f, 18f,
-                    0f, 0f, 1.15f, 0f, 22f,
-                    0f, 0f, 0f, 1f, 0f
-                ))
-            }
-            CameraMode.HIGH_RES_50MP -> {
-                // 50MP Ultra HD Mode: Crisp, pristine natural rendering
-                cm.setSaturation(1.08f)
-                val contrast = 1.05f
-                val t = (-0.5f * contrast + 0.5f) * 255f
-                cm.postConcat(ColorMatrix(floatArrayOf(
-                    contrast, 0f, 0f, 0f, t + 4f,
-                    0f, contrast, 0f, 0f, t + 4f,
-                    0f, 0f, contrast, 0f, t + 4f,
-                    0f, 0f, 0f, 1f, 0f
-                )))
-            }
-            CameraMode.PORTRAIT -> {
-                // Front / Rear Portrait: Flattering warm skin tone and gentle highlight softness
-                cm.setSaturation(1.05f)
-                val skinMatrix = ColorMatrix(floatArrayOf(
-                    1.06f, 0f, 0f, 0f, 6f,
-                    0f, 1.03f, 0f, 0f, 4f,
-                    0f, 0f, 0.98f, 0f, 0f,
-                    0f, 0f, 0f, 1f, 0f
-                ))
-                cm.postConcat(skinMatrix)
-            }
-            CameraMode.DOC_SCAN -> {
-                cm.setSaturation(0.1f)
-                val contrast = 1.4f
-                val t = (-0.5f * contrast + 0.5f) * 255f
-                cm.postConcat(ColorMatrix(floatArrayOf(
-                    contrast, 0f, 0f, 0f, t,
-                    0f, contrast, 0f, 0f, t,
-                    0f, 0f, contrast, 0f, t,
-                    0f, 0f, 0f, 1f, 0f
-                )))
-            }
-            else -> {
-                // Standard Photo Mode: Sony IMX882 true-color vibrant look
-                cm.setSaturation(1.10f)
-                val contrast = 1.04f
-                val t = (-0.5f * contrast + 0.5f) * 255f
-                cm.postConcat(ColorMatrix(floatArrayOf(
-                    contrast, 0f, 0f, 0f, t + 3f,
-                    0f, contrast, 0f, 0f, t + 3f,
-                    0f, 0f, contrast, 0f, t + 3f,
-                    0f, 0f, 0f, 1f, 0f
-                )))
-            }
+        if (mode == CameraMode.DOC_SCAN) {
+            val output = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(output)
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+            val cm = ColorMatrix()
+            cm.setSaturation(0.0f)
+            val contrast = 1.35f
+            val t = (-0.5f * contrast + 0.5f) * 255f
+            cm.postConcat(ColorMatrix(floatArrayOf(
+                contrast, 0f, 0f, 0f, t,
+                0f, contrast, 0f, 0f, t,
+                0f, 0f, contrast, 0f, t,
+                0f, 0f, 0f, 1f, 0f
+            )))
+            paint.colorFilter = ColorMatrixColorFilter(cm)
+            canvas.drawBitmap(src, 0f, 0f, paint)
+            return output
         }
-
-        paint.colorFilter = ColorMatrixColorFilter(cm)
-        canvas.drawBitmap(src, 0f, 0f, paint)
-        return output
+        
+        // Return original crystal clear raw sensor photo without artificial brightness wash
+        return src
     }
 
     private fun decodeRotatedBitmap(filePath: String, isFrontCamera: Boolean): Bitmap {
@@ -297,17 +248,29 @@ object PhotoProcessor {
     }
 
     private fun cropToAspectRatio(src: Bitmap, aspectRatio: AspectRatioMode): Bitmap {
-        val targetRatio = when (aspectRatio) {
-            AspectRatioMode.RATIO_4_3 -> 4f / 3f
-            AspectRatioMode.RATIO_16_9 -> 16f / 9f
-            AspectRatioMode.RATIO_1_1 -> 1f
-            AspectRatioMode.FULL -> 20f / 9f
-        }
-        
         val width = src.width
         val height = src.height
+        val isPortrait = height > width
+
+        val targetRatio = if (isPortrait) {
+            when (aspectRatio) {
+                AspectRatioMode.RATIO_4_3 -> 3f / 4f
+                AspectRatioMode.RATIO_16_9 -> 9f / 16f
+                AspectRatioMode.RATIO_1_1 -> 1f
+                AspectRatioMode.FULL -> 9f / 20f
+            }
+        } else {
+            when (aspectRatio) {
+                AspectRatioMode.RATIO_4_3 -> 4f / 3f
+                AspectRatioMode.RATIO_16_9 -> 16f / 9f
+                AspectRatioMode.RATIO_1_1 -> 1f
+                AspectRatioMode.FULL -> 20f / 9f
+            }
+        }
+        
         val currentRatio = width.toFloat() / height.toFloat()
         
+        // If already matching aspect ratio (e.g. 3072x4096 or 3456x4608 4:3 portrait/landscape), preserve full uncompressed resolution
         if (kotlin.math.abs(currentRatio - targetRatio) < 0.05f) {
             return src
         }
