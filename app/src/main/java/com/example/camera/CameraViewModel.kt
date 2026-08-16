@@ -170,14 +170,35 @@ class CameraViewModel(application: Application) : AndroidViewModel(application),
             it.setSurfaceProvider(previewView.surfaceProvider)
         }
 
-        imageCapture = ImageCapture.Builder()
-            .setCaptureMode(
-                if (_uiState.value.currentMode == CameraMode.NIGHT) {
-                    ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY
+        val resolutionSelector = androidx.camera.core.resolutionselector.ResolutionSelector.Builder()
+            .setAspectRatioStrategy(
+                androidx.camera.core.resolutionselector.AspectRatioStrategy(
+                    when (_uiState.value.aspectRatio) {
+                        AspectRatioMode.RATIO_16_9 -> androidx.camera.core.AspectRatio.RATIO_16_9
+                        else -> androidx.camera.core.AspectRatio.RATIO_4_3
+                    },
+                    androidx.camera.core.resolutionselector.AspectRatioStrategy.FALLBACK_RULE_AUTO
+                )
+            )
+            .setResolutionStrategy(
+                if (_uiState.value.currentMode == CameraMode.HIGH_RES_50MP) {
+                    androidx.camera.core.resolutionselector.ResolutionStrategy(
+                        android.util.Size(8192, 6144),
+                        androidx.camera.core.resolutionselector.ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER
+                    )
                 } else {
-                    ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
+                    androidx.camera.core.resolutionselector.ResolutionStrategy(
+                        android.util.Size(4000, 3000),
+                        androidx.camera.core.resolutionselector.ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER
+                    )
                 }
             )
+            .build()
+
+        imageCapture = ImageCapture.Builder()
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+            .setResolutionSelector(resolutionSelector)
+            .setJpegQuality(100)
             .setFlashMode(
                 when (_uiState.value.flashMode) {
                     FlashMode.ON -> ImageCapture.FLASH_MODE_ON

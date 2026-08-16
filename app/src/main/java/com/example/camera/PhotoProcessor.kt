@@ -1,5 +1,7 @@
 package com.example.camera
 
+import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -9,12 +11,14 @@ import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
 import android.graphics.Paint
-import android.graphics.Rect
-import android.graphics.RectF
 import android.graphics.Typeface
 import android.media.ExifInterface
+import android.media.MediaScannerConnection
+import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
+import android.util.Log
 import com.example.model.AspectRatioMode
-import com.example.model.BokehShape
 import com.example.model.CameraMode
 import com.example.model.CapturedItem
 import com.example.model.FilterType
@@ -52,43 +56,50 @@ object PhotoProcessor {
         // 2. Crop to aspect ratio if needed
         val croppedBitmap = cropToAspectRatio(rawBitmap, aspectRatio)
         
-        // 3. Apply color filter
-        val filteredBitmap = applyColorFilter(croppedBitmap, filter)
+        // 3. Apply Vivo Sony IMX882 High Dynamic Range & Color Enhancement
+        val enhancedBitmap = applyVivoT3SensorEnhancement(croppedBitmap, mode)
+
+        // 4. Apply user color filter
+        val filteredBitmap = applyColorFilter(enhancedBitmap, filter)
         
-        // 4. Apply portrait bokeh if portrait mode
+        // 5. Apply portrait bokeh if portrait mode
         val processedBitmap = if (mode == CameraMode.PORTRAIT) {
             applyPortraitBokehSimulation(filteredBitmap, portraitSettings)
         } else {
             filteredBitmap
         }
         
-        // 5. Apply Vivo T3 Watermark
+        // 6. Apply Vivo T3 Watermark
         val finalBitmap = if (watermarkSettings.enabled) {
             applyVivoWatermark(processedBitmap, watermarkSettings, mode)
         } else {
             processedBitmap
         }
         
-        // 6. Save final image to app media folder
-        val outputDir = File(context.filesDir, "vivo_photos")
-        if (!outputDir.exists()) outputDir.mkdirs()
+        // 7. Save to BOTH App Internal Storage AND Public DCIM/Camera (Phone Gallery)
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val fileName = "IMG_${timestamp}_VIVOT3_${mode.name.lowercase(Locale.US)}.jpg"
         
-        val fileName = "VIVO_T3_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}_${UUID.randomUUID().toString().take(4)}.jpg"
-        val outputFile = File(outputDir, fileName)
-        
-        FileOutputStream(outputFile).use { out ->
-            finalBitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
+        // Internal cache for in-app instant preview
+        val internalDir = File(context.filesDir, "vivo_photos")
+        if (!internalDir.exists()) internalDir.mkdirs()
+        val internalFile = File(internalDir, fileName)
+        FileOutputStream(internalFile).use { out ->
+            finalBitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
         }
+
+        // Public Gallery Save (MediaStore DCIM/Camera)
+        val savedPublicUri = saveToPublicGallery(context, finalBitmap, fileName)
         
-        // Clean up temp raw file if different
-        if (rawFile.exists() && rawFile.absolutePath != outputFile.absolutePath) {
+        // Clean up temp raw file
+        if (rawFile.exists() && rawFile.absolutePath != internalFile.absolutePath) {
             rawFile.delete()
         }
 
         CapturedItem(
             id = UUID.randomUUID().toString(),
-            uri = outputFile.toURI().toString(),
-            filePath = outputFile.absolutePath,
+            uri = savedPublicUri?.toString() ?: internalFile.toURI().toString(),
+            filePath = internalFile.absolutePath,
             dateAdded = System.currentTimeMillis(),
             width = finalBitmap.width,
             height = finalBitmap.height,
@@ -103,8 +114,128 @@ object PhotoProcessor {
         )
     }
 
+    private fun saveToPublicGallery(context: Context, bitmap: Bitmap, fileName: String): Uri? {
+        return try {
+            val contentValues = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+                put(MediaStore.Images.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
+                put(MediaStore.Images.Media.DATE_TAKEN, System.currentTimeMillis())
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "DCIM/Camera")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+            }
+
+            val resolver = context.contentResolver
+            val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+            if (uri != null) {
+                resolver.openOutputStream(uri)?.use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
+                    out.flush()
+                }
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    contentValues.clear()
+                    contentValues.put(MediaStore.Images.Media.IS_PENDING, 0)
+                    resolver.update(uri, contentValues, null, null)
+                }
+
+                // Explicit MediaScanner broadcast to force Android system gallery to index immediately
+                try {
+                    val projection = arrayOf(MediaStore.Images.Media.DATA)
+                    resolver.query(uri, projection, null, null, null)?.use { cursor ->
+                        val colIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA)
+                        if (cursor.moveToFirst()) {
+                            val path = cursor.getString(colIndex)
+                            MediaScannerConnection.scanFile(context, arrayOf(path), arrayOf("image/jpeg"), null)
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+            uri
+        } catch (e: Exception) {
+            Log.e("PhotoProcessor", "Failed to save to MediaStore", e)
+            null
+        }
+    }
+
+    private fun applyVivoT3SensorEnhancement(src: Bitmap, mode: CameraMode): Bitmap {
+        val output = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(output)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        val cm = ColorMatrix()
+
+        when (mode) {
+            CameraMode.NIGHT, CameraMode.ASTRO -> {
+                // Vivo Super Night 2.0: Deep dynamic range boost and shadow lift
+                val brightness = 20f
+                val contrast = 1.10f
+                cm.set(floatArrayOf(
+                    contrast, 0f, 0f, 0f, brightness,
+                    0f, contrast, 0f, 0f, brightness,
+                    0f, 0f, contrast * 1.03f, 0f, brightness + 2f,
+                    0f, 0f, 0f, 1f, 0f
+                ))
+            }
+            CameraMode.HIGH_RES_50MP -> {
+                // 50MP Ultra HD Mode: Pristine clarity, subtle micro-contrast
+                cm.setSaturation(1.10f)
+                val contrast = 1.06f
+                val t = (-0.5f * contrast + 0.5f) * 255f
+                cm.postConcat(ColorMatrix(floatArrayOf(
+                    contrast, 0f, 0f, 0f, t + 3f,
+                    0f, contrast, 0f, 0f, t + 3f,
+                    0f, 0f, contrast, 0f, t + 3f,
+                    0f, 0f, 0f, 1f, 0f
+                )))
+            }
+            CameraMode.PORTRAIT -> {
+                // Natural warm skin tone rendering
+                cm.set(floatArrayOf(
+                    1.05f, 0f, 0f, 0f, 5f,
+                    0f, 1.02f, 0f, 0f, 3f,
+                    0f, 0f, 0.98f, 0f, 0f,
+                    0f, 0f, 0f, 1f, 0f
+                ))
+            }
+            CameraMode.DOC_SCAN -> {
+                // High contrast document scanning
+                cm.setSaturation(0.2f)
+                val contrast = 1.35f
+                val t = (-0.5f * contrast + 0.5f) * 255f
+                cm.postConcat(ColorMatrix(floatArrayOf(
+                    contrast, 0f, 0f, 0f, t,
+                    0f, contrast, 0f, 0f, t,
+                    0f, 0f, contrast, 0f, t,
+                    0f, 0f, 0f, 1f, 0f
+                )))
+            }
+            else -> {
+                // Vivo Signature Vibrant Sony IMX882 Tuning
+                cm.setSaturation(1.15f)
+                val contrast = 1.06f
+                val t = (-0.5f * contrast + 0.5f) * 255f
+                cm.postConcat(ColorMatrix(floatArrayOf(
+                    contrast, 0f, 0f, 0f, t + 3f,
+                    0f, contrast, 0f, 0f, t + 3f,
+                    0f, 0f, contrast, 0f, t + 3f,
+                    0f, 0f, 0f, 1f, 0f
+                )))
+            }
+        }
+
+        paint.colorFilter = ColorMatrixColorFilter(cm)
+        canvas.drawBitmap(src, 0f, 0f, paint)
+        return output
+    }
+
     private fun decodeRotatedBitmap(filePath: String, isFrontCamera: Boolean): Bitmap {
-        val bitmap = BitmapFactory.decodeFile(filePath) ?: createFallbackBitmap()
+        val options = BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+            inMutable = true
+        }
+        val bitmap = BitmapFactory.decodeFile(filePath, options) ?: createFallbackBitmap()
         var rotation = 0
         try {
             val exif = ExifInterface(filePath)
@@ -180,7 +311,6 @@ object PhotoProcessor {
 
         when (filter) {
             FilterType.VIVO_VIVID -> {
-                // Saturated vibrance with rich warm tones
                 cm.set(floatArrayOf(
                     1.2f, 0f, 0f, 0f, 10f,
                     0f, 1.25f, 0f, 0f, 10f,
@@ -189,7 +319,6 @@ object PhotoProcessor {
                 ))
             }
             FilterType.VIVO_TEXTURED -> {
-                // High contrast cinematic texture
                 cm.set(floatArrayOf(
                     1.3f, 0f, 0f, 0f, -15f,
                     0f, 1.2f, 0f, 0f, -15f,
@@ -198,7 +327,6 @@ object PhotoProcessor {
                 ))
             }
             FilterType.CYBERPUNK -> {
-                // Neon cyan and magenta punch
                 cm.set(floatArrayOf(
                     1.4f, 0f, 0.2f, 0f, 20f,
                     0f, 0.9f, 0.1f, 0f, -10f,
@@ -207,7 +335,6 @@ object PhotoProcessor {
                 ))
             }
             FilterType.BLACK_GOLD -> {
-                // Warm amber highlights, dark slate shadows
                 cm.setSaturation(0.2f)
                 val tint = ColorMatrix(floatArrayOf(
                     1.3f, 0f, 0f, 0f, 25f,
@@ -218,7 +345,6 @@ object PhotoProcessor {
                 cm.postConcat(tint)
             }
             FilterType.VINTAGE_FILM -> {
-                // Warm 35mm nostalgic faded shadows
                 cm.set(floatArrayOf(
                     1.15f, 0.05f, 0f, 0f, 20f,
                     0.05f, 1.1f, 0f, 0f, 15f,
@@ -227,7 +353,6 @@ object PhotoProcessor {
                 ))
             }
             FilterType.FRENCH_RETRO -> {
-                // Soft pastel tones with slight desaturation
                 cm.setSaturation(0.85f)
                 val retro = ColorMatrix(floatArrayOf(
                     1.1f, 0f, 0f, 0f, 15f,
@@ -238,7 +363,6 @@ object PhotoProcessor {
                 cm.postConcat(retro)
             }
             FilterType.CINE_TEAL_ORANGE -> {
-                // Teal shadows, Orange skin/highlights
                 cm.set(floatArrayOf(
                     1.3f, -0.1f, -0.1f, 0f, 20f,
                     -0.05f, 1.1f, 0.1f, 0f, 0f,
@@ -247,7 +371,6 @@ object PhotoProcessor {
                 ))
             }
             FilterType.NOIR_BW -> {
-                // Deep black and white high contrast
                 cm.setSaturation(0f)
                 val contrast = ColorMatrix(floatArrayOf(
                     1.35f, 0f, 0f, 0f, -20f,
@@ -266,7 +389,6 @@ object PhotoProcessor {
     }
 
     private fun applyPortraitBokehSimulation(src: Bitmap, portraitSettings: PortraitSettings): Bitmap {
-        // Soft vignette and depth focus simulation based on f-stop
         val output = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output)
         canvas.drawBitmap(src, 0f, 0f, null)
@@ -275,7 +397,6 @@ object PhotoProcessor {
         val apertureFactor = (4.0f - portraitSettings.apertureFStop.coerceIn(0.95f, 4.0f)) / 3.0f
         
         if (apertureFactor > 0.1f) {
-            // Draw gentle optical blur border vignette
             val borderAlpha = (apertureFactor * 40).toInt().coerceIn(10, 80)
             paint.color = Color.argb(borderAlpha, 0, 0, 0)
             paint.style = Paint.Style.STROKE
@@ -314,7 +435,6 @@ object PhotoProcessor {
 
         when (watermarkSettings.style) {
             WatermarkStyle.CLASSIC_VIVO -> {
-                // Vivo Badge + vivo T3 5G | 50MP OIS Camera
                 val primaryText = "vivo T3 5G"
                 val secondaryText = if (mode == CameraMode.HIGH_RES_50MP) "50MP ULTRA HD | OIS" else "50MP OIS Camera"
                 val dateText = SimpleDateFormat("yyyy.MM.dd HH:mm", Locale.getDefault()).format(Date())
@@ -322,21 +442,17 @@ object PhotoProcessor {
                 textPaint.textSize = 28f * scale
                 subTextPaint.textSize = 18f * scale
 
-                // Draw Vivo Logo Circle Badge
                 val badgeRadius = 14f * scale
                 val badgeX = padding + badgeRadius
                 val badgeY = bottomY - 14f * scale
                 
-                // Outer gold badge ring
                 paint.color = Color.parseColor("#E5A93C")
                 paint.style = Paint.Style.FILL
                 canvas.drawCircle(badgeX, badgeY, badgeRadius, paint)
                 
-                // Inner blue badge
                 paint.color = Color.parseColor("#0C2040")
                 canvas.drawCircle(badgeX, badgeY, badgeRadius * 0.85f, paint)
 
-                // "v" initial inside badge
                 val badgeTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                     color = Color.parseColor("#F5BA42")
                     typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
@@ -345,11 +461,9 @@ object PhotoProcessor {
                 }
                 canvas.drawText("v", badgeX, badgeY + 5.5f * scale, badgeTextPaint)
 
-                // Main model text
                 val textX = badgeX + badgeRadius + (12f * scale)
                 canvas.drawText(primaryText, textX, bottomY - 14f * scale, textPaint)
 
-                // Pipe separator and subtitle
                 val oisText = " | $secondaryText"
                 val primaryWidth = textPaint.measureText(primaryText)
                 val goldPaint = Paint(subTextPaint).apply {
@@ -358,7 +472,6 @@ object PhotoProcessor {
                 }
                 canvas.drawText(oisText, textX + primaryWidth, bottomY - 14f * scale, goldPaint)
 
-                // Timestamp / Custom author on second line if enabled
                 val subline = if (watermarkSettings.customAuthor.isNotBlank() && watermarkSettings.customAuthor != "Shot on vivo T3 5G") {
                     "${watermarkSettings.customAuthor}  •  $dateText"
                 } else {
@@ -370,7 +483,6 @@ object PhotoProcessor {
             }
 
             WatermarkStyle.ZEISS_STYLE -> {
-                // Modern bottom bar style
                 textPaint.textSize = 24f * scale
                 subTextPaint.textSize = 16f * scale
                 
@@ -388,7 +500,6 @@ object PhotoProcessor {
             }
 
             WatermarkStyle.FILM_BORDER -> {
-                // Film border frame at bottom
                 paint.color = Color.argb(160, 15, 17, 22)
                 canvas.drawRect(0f, src.height - (60f * scale), src.width.toFloat(), src.height.toFloat(), paint)
                 
