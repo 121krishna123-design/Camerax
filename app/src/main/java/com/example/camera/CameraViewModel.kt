@@ -177,40 +177,31 @@ class CameraViewModel(application: Application) : AndroidViewModel(application),
                 }
             }
 
-            // 2. Setup Preview
-            val preview = Preview.Builder().build().also {
-                it.setSurfaceProvider(previewView.surfaceProvider)
-            }
-
-            // 3. Setup ResolutionSelector based on camera lens and mode
+            // 2. Setup Preview & Aspect Ratio Strategy
             val preferredAspect = when (_uiState.value.aspectRatio) {
                 AspectRatioMode.RATIO_16_9 -> AspectRatio.RATIO_16_9
                 else -> AspectRatio.RATIO_4_3
             }
 
-            val targetBoundSize = if (isFront) {
-                Size(4608, 3456) // 16MP HD front camera resolution
-            } else if (_uiState.value.currentMode == CameraMode.HIGH_RES_50MP) {
-                Size(8192, 6144) // 50MP Sony IMX882 sensor resolution
-            } else {
-                Size(8192, 6144)
-            }
-
-            val resolutionSelectorBuilder = ResolutionSelector.Builder()
+            val resolutionSelector = ResolutionSelector.Builder()
                 .setAspectRatioStrategy(
                     AspectRatioStrategy(preferredAspect, AspectRatioStrategy.FALLBACK_RULE_AUTO)
                 )
                 .setResolutionStrategy(
-                    ResolutionStrategy(targetBoundSize, ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER)
+                    ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY
                 )
-                .setResolutionFilter { supportedSizes, _ ->
-                    // Prioritize highest sensor resolution available
-                    supportedSizes.sortedByDescending { it.width * it.height }
+                .build()
+
+            val preview = Preview.Builder()
+                .setResolutionSelector(resolutionSelector)
+                .build()
+                .also {
+                    it.setSurfaceProvider(previewView.surfaceProvider)
                 }
 
             val imageCaptureBuilder = ImageCapture.Builder()
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                .setResolutionSelector(resolutionSelectorBuilder.build())
+                .setResolutionSelector(resolutionSelector)
                 .setJpegQuality(100)
                 .setFlashMode(
                     when (_uiState.value.flashMode) {
